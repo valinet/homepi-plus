@@ -28,7 +28,10 @@
 // enc28j60
 #include "src/EtherCard/src/EtherCard.h"
 // MDNS
+#define USE_MDNS
+#ifdef USE_MDNS
 #include "src/EtherCard-MDNS/EC_MDNSResponder.h"
+#endif
 
 int latchPin = 4;
 int clockPin = 2;
@@ -90,6 +93,8 @@ IRsendNEC irsend;
 #define DELOCK_CH5 0xFF708F
 #define DELOCK_PREV 0xFF28D7
 #define DELOCK_NEXT 0xFF6897
+
+#define HOSTNAME "homepi"
 
 char post_data[POST_SIZE];
 byte p_i = 0;
@@ -308,7 +313,8 @@ void setup()
   ////print_time();
   ////ether.printIp("EtherCard: DNS - ", ether.dnsip);
 
-  if(!mdns.begin("homepi", ether)) {
+  #ifdef USE_MDNS
+  if(!mdns.begin(HOSTNAME, ether)) {
     //Serial.println("MDNS error");
   } else {
     //Serial.println("Listening on homepi.local");
@@ -319,6 +325,7 @@ void setup()
   ENC28J60::enableMulticast();
   ether.enableMulticast();
   ////Serial.println("EtherCard: Enable broadcast, multicast.");
+  #endif
 
   ////print_time();
   ////Serial.println("EtherCard: Listening...");
@@ -665,6 +672,12 @@ void ether_get()
 const char redirect[] PROGMEM =
     "HTTP/1.0 302 Found\r\n"
     "Location: http://$D.$D.$D.$D/\r\n"
+    "\r\n"
+    ;
+
+const char redirect_mdns[] PROGMEM =
+    "HTTP/1.0 302 Found\r\n"
+    "Location: http://$S$S/\r\n"
     "\r\n"
     ;
 
@@ -1044,6 +1057,13 @@ void loop()
         delay(100);
   
         buffer = ether.tcpOffset();
+#ifdef USE_MDNS
+        buffer.emit_p(
+          redirect_mdns,
+          HOSTNAME,
+          ".local"
+        );
+#else
         buffer.emit_p(
           redirect,
           ether.myip[0],
@@ -1051,6 +1071,7 @@ void loop()
           ether.myip[2],
           ether.myip[3]
         );
+#endif
         ether.httpServerReply_with_flags(
           buffer.position(), 
           TCP_FLAGS_ACK_V | TCP_FLAGS_FIN_V
