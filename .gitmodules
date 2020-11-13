@@ -1,0 +1,12 @@
+[submodule "src/ArduinoCore-avr"]
+	path = src/ArduinoCore-avr
+	url = https://github.com/arduino/ArduinoCore-avr
+[submodule "src/EtherCard-MDNS"]
+	path = src/EtherCard-MDNS
+	url = https://github.com/valinet/EtherCard-MDNS
+[submodule "src/EtherCard"]
+	path = src/EtherCard
+	url = https://github.com/valinet/EtherCard
+[submodule "src/IRLib2"]
+	path = src/IRLib2
+	url = https://github.com/valinet/IRLib2
