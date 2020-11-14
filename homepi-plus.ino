@@ -321,9 +321,9 @@ void setup()
   }
 
   ////print_time();
-  ENC28J60::enableBroadcast();
+  //ENC28J60::enableBroadcast();
   ENC28J60::enableMulticast();
-  ether.enableMulticast();
+  //ether.enableMulticast();
   ////Serial.println("EtherCard: Enable broadcast, multicast.");
   #endif
 
