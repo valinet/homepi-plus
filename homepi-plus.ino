@@ -32,14 +32,10 @@
 #ifdef USE_MDNS
 #include "src/EtherCard-MDNS/EC_MDNSResponder.h"
 #endif
-// base64
-#include "src/arduino-base64/Base64.h"
 // TOTP
 #include "src/TOTP-Arduino/src/TOTP.h"
 // header file containing secret for TOTP
 #include "C:\KEYS\key.h" // contains KEY define
-// header file containing public IP:port
-#include "C:\KEYS\external_addr.h" // contains EXTERNAL_ADDR define
 
 int latchPin = 4;
 int clockPin = 2;
@@ -78,14 +74,19 @@ byte pin_ainput = 0;
 #define ETHER_BUFLEN 300
 #define ETHER_MINCHUNKLEN ETHER_BUFLEN - 20
 #define POST_VAL_SIZE 6
-#define POST_SIZE 50
 
 static byte mymac[] = { 0x74, 0x69, 0x69, 0x2D, 0x30, 0x31 };
 const static uint8_t ip[] = {192,168,105,24};
 const static uint8_t gateway[] = {192,168,105,1};
-const static uint8_t dns[] = {8,8,8,8};
 const static uint8_t mask[] = {255,255,255,0};
-#define HOSTNAME "pengu"
+const static uint8_t dns[] = {8,8,8,8}; // Google DNS resolver
+const static uint8_t ntpIp[] = {216,239,35,12}; // Google NTP server
+#define HOSTNAME "homepi"
+
+#define HOSTNAME_LEN 30
+char hostname[HOSTNAME_LEN];
+#define HOSTADDR_LEN 40
+char hostaddr[HOSTADDR_LEN];
 
 byte Ethernet::buffer[ETHER_BUFLEN];
 BufferFiller buffer;
@@ -103,12 +104,6 @@ IRsendNEC irsend;
 #define DELOCK_PREV 0xFF28D7
 #define DELOCK_NEXT 0xFF6897
 
-char post_data[POST_SIZE];
-byte p_i = 0;
-byte p_ok = 0;
-
-// NTP server name
-const char NTP_REMOTEHOST[] PROGMEM = "0.ro.pool.ntp.org";
 // NTP requests are to port 123
 const unsigned int NTP_REMOTEPORT = 123;
 // Local UDP port to use           
@@ -119,6 +114,7 @@ const unsigned int NTP_PACKET_SIZE = 48;
 // generate a key using http://www.lucadentella.it/OTP/
 uint8_t hmacKey[] = KEY;
 TOTP totp = TOTP(hmacKey, 16);
+#define NUM_DIGITS 8
 
 // keeps track of millis() so that the clock is
 // resyncronized with the NTP server once it overflows
@@ -131,7 +127,7 @@ unsigned long epoch = 0;
 
 // number of allowed web requests from the public Internet
 // the counter resets with each new TOTP code generated
-#define MAX_ATTEMPTS 3
+#define MAX_ATTEMPTS 2
 uint8_t attempts = 0;
 // previous TOTP code generated (helps in resetting above
 // counter)
@@ -376,13 +372,17 @@ void setup()
 
   ether.hisport = HTTP_PORT;
   ether.printIp("EtherCard: IP - ", ether.myip);
-  
-  if (!ether.dnsLookup(NTP_REMOTEHOST))
+
+  while (!ether.isLinkUp())
   {
-    Serial.println("DNS failed");
+    delay(100);
   }
-  uint8_t ntpIp[IP_LEN];
-  ether.copyIp(ntpIp, ether.hisip);
+  while(ether.clientWaitingDns())
+  {
+    ether.packetLoop(ether.packetReceive());
+    delay(100);
+  }
+  
   ether.printIp("NTP: ", ntpIp);
   ether.udpServerListenOnPort(&udpReceiveNtpPacket, NTP_LOCALPORT);
   sendNTPpacket(ntpIp);
@@ -521,7 +521,7 @@ const char page[] PROGMEM =
     "  </head>\n"
     "  <body>\n"
     "   <div class=\"container widthel\">\n"
-    "     <form action=\"/\" method=post>\n"
+    "     <form id=\"fm\" method=get>\n"
     "       <h2>\n"
     "         homepi+\n"
     "       </h2>\n"
@@ -603,6 +603,7 @@ const char top[] PROGMEM =
     ;
 
 const char topA[] PROGMEM =
+    "       document.getElementById('fm').action = \"$S\";\n"
     "       document.getElementById('brightnessValue').innerHTML = $D;\n"
     "       document.getElementById('brightnessSlider').value = $D;\n"
     ;
@@ -642,11 +643,19 @@ void ether_get(bool external, bool authed = false)
   {
     buffer = ether.tcpOffset(); 
     buffer.emit_p(PSTR(
-      "HTTP/1.0 401 Unauthorized\r\n"
-      "WWW-Authenticate: Basic realm='none'\r\n"
+      //"HTTP/1.0 401 Unauthorized\r\n"
+      //"WWW-Authenticate: Basic realm='none'\r\n"
+      //"\r\n"
+      //"<h1>Access is denied.</h1>"
+      "HTTP/1.0 200 OK\r\n"
+      "Content-Type: text/html\r\n"
+      "Pragma: no-cache\r\n"
       "\r\n"
-      "Access denied."
-    ));
+      "<html><head><script>window.onload=function(){"
+      "var code=prompt(\"\",\"\");"
+      "if(code!=null)location.replace(\"http://$S/\"+code);}"
+      "</script></head><body></body></html>"), hostname
+    );
     ether.httpServerReply_with_flags(
       buffer.position(), 
       TCP_FLAGS_ACK_V | TCP_FLAGS_FIN_V
@@ -667,6 +676,7 @@ void ether_get(bool external, bool authed = false)
     buffer = ether.tcpOffset();
     buffer.emit_p(
       topA,
+      hostaddr,
       _brightness,
       _brightness
     );
@@ -758,28 +768,10 @@ void ether_get(bool external, bool authed = false)
 
 const char redirect[] PROGMEM =
     "HTTP/1.0 302 Found\r\n"
-    "Location: http://$D.$D.$D.$D/\r\n"
+    "Location: http://$S/$S\r\n"
     "\r\n"
     ;
-
-const char redirect_mdns[] PROGMEM =
-    "HTTP/1.0 302 Found\r\n"
-    "Location: http://$S$S/\r\n"
-    "\r\n"
-    ;
-
-const char redirect_external[] PROGMEM =
-    "HTTP/1.0 302 Found\r\n"
-    "Location: http://" EXTERNAL_ADDR
-    "\r\n\r\n"
-    ;
-
-const char post_ok[] PROGMEM =
-    "HTTP/1.0 200 OK\r\n"
-    "\r\n"
-    "\r\n"
-    ;
-    
+  
 void ether_post(char* packet)
 {
   ////print_time();
@@ -1133,6 +1125,33 @@ void loop()
       }
     }*/
     const char* packet = (const char*)ether.tcpOffset();
+
+    char* hostloc = strstr(packet, "Host: ");
+    if (hostloc)
+    {
+      hostloc += 6;
+      char* hostlocfin = strchr(hostloc, '\r');
+      if (hostlocfin)
+      {
+        hostlocfin[0] = 0;
+        memset(hostname, 0, HOSTNAME_LEN);
+        memcpy(hostname, hostloc, HOSTNAME_LEN - 1);
+        hostlocfin[0] = '\r';
+      }
+    }
+    char* addr = strstr(packet, " /");
+    if (addr)
+    {
+      addr += 2;
+      char* fin = strchr(addr, ' ');
+      if (fin)
+      {
+        fin[0] = 0;
+        memset(hostaddr, 0, HOSTADDR_LEN);
+        memcpy(hostaddr, addr, HOSTADDR_LEN - 1);
+        fin[0] = ' ';
+      }
+    }
     
     bool is_external = false;
     bool authed = false;
@@ -1141,30 +1160,32 @@ void loop()
     {
       is_external = true;
 
-      char* auth_data = strstr(packet, "Authorization: Basic ");
-      if (auth_data)
+      char* addr = strstr(packet, " /");
+      if (addr)
       {
-        char* auth_end = strchr(auth_data, '\r');
-        if (auth_end)
+        addr += 2;
+        char* fin = strchr(addr, ' ');
+        if (fin)
         {
-          auth_end[0] = 0;
-          char* pass = auth_data + 21;
-          size_t len = auth_end - pass;
-          int decodedLen = base64_dec_len(pass, len);
-          char decoded[decodedLen + 1];
-          memset(decoded, 0, decodedLen + 1);
-          base64_decode(decoded, pass, len);
+          fin[0] = 0;
+          memset(hostaddr, 0, HOSTADDR_LEN);
+          memcpy(hostaddr, addr, HOSTADDR_LEN - 1);
+          fin[0] = ' ';
+          
           unsigned long t = epoch + (millis() / 1000) - millis_offset / 1000;
           char* code = totp.getCode(t);
-          decoded[strchr(decoded, ':') - decoded] = 0;
+          /*
           Serial.print(t);
           Serial.print(" - ");
           Serial.print(attempts);
           Serial.print(" - ");
-          Serial.print(decoded);
+          Serial.print(hostaddr);
           Serial.print(" - ");
           Serial.println(code);
-          if (!strcmp(decoded, code))
+          */
+          char o = hostaddr[NUM_DIGITS];
+          hostaddr[NUM_DIGITS] = 0;
+          if (!strcmp(hostaddr, code))
           {
             unsigned int ccode = atoi(code);
             if (ccode != last_code)
@@ -1183,78 +1204,39 @@ void loop()
               attempts++;
             }
           }
-          auth_end[0] = '\r';
+          hostaddr[NUM_DIGITS] = o;
         }
       }
     }
     
-    if (packet[0] == 'G' && packet[1] == 'E' && packet[2] == 'T') {    
+    if (!strchr(hostaddr, '?')) 
+    {
       ether_get(is_external, authed);
-      p_ok = 0;
-      p_i = 0;
-    } else {
+    } 
+    else 
+    {
       if (!is_external || (is_external && authed))
       {
-        ether.setBufferPtr(pos);
-        byte b, b1 = 0, b2 = 0, b3 = 0;
-        while(ether.packetPayloadSize>0)
-        {
-          b3 = b2;
-          b2 = b1;
-          b1 = b;
-          b=ether.readByte();
-          if (p_ok)
-          {
-            post_data[p_i] = b;
-            p_i++;
-          }
-          if (b == '\n' && b1 == '\r' && b2 == '\n' && b1 == '\r')
-          {
-            p_ok = 1;
-          }
-        }
-        post_data[p_i] = 0;
-        if (p_i != 0)
-        {
-          ether_post(post_data);
-    
-          delay(100);
-    
-          buffer = ether.tcpOffset();
-          if (is_external)
-          {
-            buffer.emit_p(
-              redirect_external,
-              HOSTNAME,
-              ".local"
-            );
-          }
-          else
-          {
-  #ifdef USE_MDNS
-          buffer.emit_p(
-            redirect_mdns,
-            HOSTNAME,
-            ".local"
-          );
-  #else
-          buffer.emit_p(
-            redirect,
-            ether.myip[0],
-            ether.myip[1],
-            ether.myip[2],
-            ether.myip[3]
-          );
-  #endif
-          }
-          ether.httpServerReply_with_flags(
-            buffer.position(), 
-            TCP_FLAGS_ACK_V | TCP_FLAGS_FIN_V
-          );
-  
-          p_ok = 0;
-          p_i = 0;
-        }
+        ether_post(strchr(hostaddr, '?') + 1);
+        
+        ether.httpServerReplyAck();
+        buffer = ether.tcpOffset();
+
+        hostaddr[NUM_DIGITS] = 0;
+        buffer.emit_p(
+          redirect,
+          hostname,
+          is_external ? hostaddr : ""
+        );
+        
+        ether.httpServerReply_with_flags(
+          buffer.position(), 
+          TCP_FLAGS_ACK_V | TCP_FLAGS_FIN_V
+        );
+      }
+      else
+      {
+        ether_get(is_external, authed);
       }
     }
   }

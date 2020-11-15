@@ -27,13 +27,13 @@ In order to easily discover the service, the service exposes its presence via mD
 In order to facilitate access from the public Internet, a series of precautions had to be taken. Specifically, a low overhead method of authentication was necessary, as otherwise anyone who knows or finds out the IP and the external port (if using NAT) could potentially issue commands to this, at least. Furthermore, this is not really intended as a general purpose web application, but rather dedicated only to the user of the system in those exceptional situations when he/she is remote and needs to change some of the system's parameters. HTTPS was first that came to mind, but the overhead was too big to bear; furthermore, extensive rewrites of some of the libraries would have been required. Seeking a faster solution, I thought about TOTP (time based one-time password), publicly well known as 'authenticator' (popularly used in tokening applications, like 2 factor authentication, with popular clients like Google Authenticator etc). The protocol is low overhead, and with a few precautions it can be a very robust security solution. The way it is implemented in this:
 
 * Arduino connects to the Internet and figures out the current date and time (*epoch*) by querying a public NTP server
-* Only when an HTTP request from the outside is made, the system will report back "401 Unauthorized" to the user agent. This will make the user agent ask for credentials, most probably in the form of an authentication prompt in the browser.
-* For credentials, the user agent is expected to provide the *current* authenticator code. When the provided code matches with the expected one, the web page is served back with a "200 OK" status code and an internal counter is incremented. The system is now in the 'open' state. When the user agent posts the new configuration data, the same counter is incremented yet again and the confirmation is sent back to the user agent in the form of serving the updating page back and a "200 OK" status code. The system will revert back to the 'closed' state. From this moment on, the user agent will be denied any new request until the current authenticator code expires. After this happens, the user agent will again have to provide the current authenticator code and the cycle will repeat.
+* Only when an HTTP request from the outside is made, ~~the system will report back "401 Unauthorized" to the user agent. This will make the user agent ask for credentials, most probably in the form of an authentication prompt in the browser.~~ the system will have the browser prompt the user for a 'password' by sending a page containing JavaScript.
+* As a password, the user agent is expected to provide the *current* authenticator code. When the provided code matches with the expected one, the web page is served back with a "200 OK" status code and an internal counter is incremented. The system is now in the 'open' state. When the user agent uploads the new configuration data via a custom formatted GET request, the same counter is incremented yet again and the confirmation is sent back to the user agent in the form of serving back the updated page and a "200 OK" status code. The system will revert back to the 'closed' state. From this moment on, the user agent will be denied any new request until the current authenticator code expires. After this happens, the user agent will again have to provide the current authenticator code and the cycle will repeat.
 * The above is done so that we reduce the chance external agents will tamper with the service when it is in the 'open' state. This could be implemented by reducing the time a code is valid, but that meant typing it in the authentication prompt had to be done faster.
-* If data is not posted while the current code is valid, posting the data subsequently will fail (the request will hang, as the server will outright discard the request without processing any of it) until the user agent requests the web resource again and provides the new authenticode.
+* If data is not uploaded while the current code is valid, posting the data subsequently will fail (the request will hang, as the server will outright discard the request without processing any of it) until the user agent requests the web resource again and provides the new authenticode.
 * Limitations: another agent may hijack the server and post its own data in the time between a successful initial get request and the subsequent post back of updated data before a new authenticode generates. Also, multiple legitimate agents cannot use the web page at the same time, as the service does not keep track of the individual agents that connect to it (this is pretty impossible no matter how many arrays you implement to keep track of 'connected' agents because EtherCard works pretty much on a single port; for this to work, you'd have to talk separately on different ports with all the agents connected for a use case that frankly does not really exist for this application; also, you have to watch out and fir all of this in the measly quantity of available program and random access memory)
 * In order to improve TOTP security, the SHA-256 algorithm and 8 digits authenticodes are used by default.
-* The above procedure is done by employing the following libraries: TOTP-Arduino - for authenticode generation, Cryptosuite - used internally by TOTP-Arduino to generate SHA-1 or SHA-256 hashes, arduino-base64 - used to decode the authentication data in the HTTP headers
+* The above procedure is done by employing the following libraries: TOTP-Arduino - for authenticode generation, Cryptosuite - used internally by TOTP-Arduino to generate SHA-1 or SHA-256 hashes, ~~arduino-base64 - used to decode the authentication data in the HTTP headers~~
 
 In order to generate the secret key for Arduino, you can use the provided generator ripped from the TOTP-Arduino project, found in "res/totp.html".
 
@@ -61,9 +61,6 @@ git submodule update --force --checkout src/EtherCard
 git clone `git config submodule.src/IRLib2.url` src/IRLib2
 git submodule absorbgitdirs src/IRLib2
 git submodule update --force --checkout src/IRLib2
-git clone `git config submodule.src/arduino-base64.url` src/arduino-base64
-git submodule absorbgitdirs src/arduino-base64
-git submodule update --force --checkout src/arduino-base64
 git clone --depth=1 --no-checkout `git config submodule.src/Cryptosuite.url` src/Cryptosuite
 git -C src/Cryptosuite config core.sparsecheckout true
 echo "Sha/sha256.h" >> src/Cryptosuite/.git/info/sparse-checkout
@@ -81,8 +78,6 @@ Lastly, there are two includes that you have to replace with proper data for you
 
 ```c
 #include "C:\KEYS\key.h"
-#include "C:\KEYS\external_addr.h"
 ```
 
 * key.h contains a define that specifies the secret key used by the TOTP algorithm: ``#define KEY {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F}``
-* external_addr.h contains a define that specifies the address and port at which the service can be reached from the public Internet: ``#define EXTERNAL_ADDR "1.2.3.4:1234"``. This is required so that after a successful POST from the public IP, the user agent is redirected to the correct external address.

@@ -10,9 +10,6 @@
 [submodule "src/IRLib2"]
 	path = src/IRLib2
 	url = https://github.com/valinet/IRLib2
-[submodule "src/arduino-base64"]
-	path = src/arduino-base64
-	url = https://github.com/adamvr/arduino-base64
 [submodule "src/Cryptosuite"]
 	path = src/Cryptosuite
 	url = https://github.com/valinet/Cryptosuite
