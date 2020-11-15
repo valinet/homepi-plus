@@ -32,6 +32,14 @@
 #ifdef USE_MDNS
 #include "src/EtherCard-MDNS/EC_MDNSResponder.h"
 #endif
+// base64
+#include "src/arduino-base64/Base64.h"
+// TOTP
+#include "src/TOTP-Arduino/src/TOTP.h"
+// header file containing secret for TOTP
+#include "C:\KEYS\key.h" // contains KEY define
+// header file containing public IP:port
+#include "C:\KEYS\external_addr.h" // contains EXTERNAL_ADDR define
 
 int latchPin = 4;
 int clockPin = 2;
@@ -77,6 +85,7 @@ const static uint8_t ip[] = {192,168,105,24};
 const static uint8_t gateway[] = {192,168,105,1};
 const static uint8_t dns[] = {8,8,8,8};
 const static uint8_t mask[] = {255,255,255,0};
+#define HOSTNAME "pengu"
 
 byte Ethernet::buffer[ETHER_BUFLEN];
 BufferFiller buffer;
@@ -94,11 +103,39 @@ IRsendNEC irsend;
 #define DELOCK_PREV 0xFF28D7
 #define DELOCK_NEXT 0xFF6897
 
-#define HOSTNAME "homepi"
-
 char post_data[POST_SIZE];
 byte p_i = 0;
 byte p_ok = 0;
+
+// NTP server name
+const char NTP_REMOTEHOST[] PROGMEM = "0.ro.pool.ntp.org";
+// NTP requests are to port 123
+const unsigned int NTP_REMOTEPORT = 123;
+// Local UDP port to use           
+const unsigned int NTP_LOCALPORT = 8888;             
+// NTP time stamp is in the first 48 bytes of the message
+const unsigned int NTP_PACKET_SIZE = 48;             
+
+// generate a key using http://www.lucadentella.it/OTP/
+uint8_t hmacKey[] = KEY;
+TOTP totp = TOTP(hmacKey, 16);
+
+// keeps track of millis() so that the clock is
+// resyncronized with the NTP server once it overflows
+unsigned long prev_millis = 10000000;
+// time between last millis() reset and last sync
+// with the NTP server
+unsigned long millis_offset = 0;
+// UNIX time obtained from the NTP server
+unsigned long epoch = 0;
+
+// number of allowed web requests from the public Internet
+// the counter resets with each new TOTP code generated
+#define MAX_ATTEMPTS 3
+uint8_t attempts = 0;
+// previous TOTP code generated (helps in resetting above
+// counter)
+unsigned int last_code = 0;
 
 ////void print_time()
 ////{
@@ -106,6 +143,64 @@ byte p_ok = 0;
   ////snprintf(buf, 20, "[%15d] ", millis());
   ////Serial.print(buf);
 ////}
+
+// taken from NTP example in EtherCard
+void sendNTPpacket(const uint8_t* remoteAddress) {
+  // buffer to hold outgoing packet
+  char packetBuffer[ NTP_PACKET_SIZE];
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;            // Stratum, or type of clock
+  packetBuffer[2] = 6;            // Polling Interval
+  packetBuffer[3] = 0xEC;         // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49;
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
+
+  // all NTP fields have been given values, now
+  // you can send a packet requesting a timestamp:
+  ether.sendUdp(
+    packetBuffer, 
+    NTP_PACKET_SIZE, 
+    NTP_LOCALPORT, 
+    remoteAddress, 
+    NTP_REMOTEPORT
+  );
+}
+
+void udpReceiveNtpPacket(
+  uint8_t dest_ip[IP_LEN], 
+  uint16_t dest_port, 
+  uint8_t src_ip[IP_LEN], 
+  uint16_t src_port, 
+  const char *packetBuffer, 
+  uint16_t len
+)
+{
+  // the timestamp starts at byte 40 of the received packet and is four bytes,
+  // or two words, long. First, extract the two words:
+  unsigned long highWord = word(packetBuffer[40], packetBuffer[41]);
+  unsigned long lowWord = word(packetBuffer[42], packetBuffer[43]);
+  // combine the four bytes (two words) into a long integer
+  // this is NTP time (seconds since Jan 1 1900):
+  unsigned long secsSince1900 = highWord << 16 | lowWord;
+  // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
+  const unsigned long seventyYears = 2208988800UL;
+  // subtract seventy years:
+  epoch = secsSince1900 - seventyYears;
+  millis_offset = millis();
+
+  // print Unix time:
+  Serial.print("Unix time = ");
+  Serial.println(epoch);
+
+  ether.udpServerPauseListenOnPort(NTP_LOCALPORT);
+}
 
 void shiftOut(int myDataPin, int myClockPin, byte myDataOut) {
   int i=0;
@@ -211,20 +306,12 @@ char ddc_get(byte what)
 
 void setup() 
 {
-  //port0 = 0b11111111;
-  //port1 = 0b11111111;
-  //shift_ports();
-  
   Serial.begin(9600);
   while (!Serial);
   Serial.println("\n");
-  ////print_time();
-  ////Serial.println("Starting homepi version 2.0 (build 2020.10.31) on Arduino Nano.");
-  
+
   digitalWrite(SDA, LOW);
   digitalWrite(SCL, LOW);
-  ////print_time();
-  ////Serial.println("Disable internal pull up resistors for i2c pins.");
 
   pinMode(latchPin, OUTPUT);
   port0 = 0;
@@ -246,8 +333,6 @@ void setup()
   shift_ports();
   pinMode(oePin, OUTPUT);
   digitalWrite(oePin, LOW);
-  ////print_time();
-  ////Serial.println("Configure pins.");
 
   port0 &= ~(1 << CTL_PIN_IR_LIGHTBULB0);
   shift_ports();
@@ -275,67 +360,53 @@ void setup()
   port1 |= (1 << CTL_PIN_DELOCK1);
   shift_ports();
   
-  ////print_time();
-  ////Serial.println("Perform startup tasks.");
-
   // enable i2c
   Wire.begin();
   Wire.setWireTimeout();
-  ////print_time();
-  ////Serial.println("Wire: Enable i2c.");
 
-  ////print_time();
   if (ether.begin(sizeof Ethernet::buffer, mymac) == 0)
   {
-  ////  Serial.print(STR_FAILED);
   }
-  ////Serial.println("EtherCard: Enable Ethernet stack.");
 
-  ////print_time();
-  //ether.staticSetup(ip, gateway, dns, mask);
-  while (!ether.dhcpSetup())
+  ether.staticSetup(ip, gateway, dns, mask);
+  /*while (!ether.dhcpSetup())
   {
-    //Serial.print(STR_FAILED);
-    //ether.staticSetup(ip, gateway, dns, mask);
-  }
-  ////Serial.println("EtherCard: DHCP configuration.");
+    delay(1000);
+  }*/
 
-  ////print_time();
   ether.hisport = HTTP_PORT;
-  ////Serial.print("EtherCard: Service port - ");
-  ////Serial.println(HTTP_PORT);
-  ////print_time();
   ether.printIp("EtherCard: IP - ", ether.myip);
-  ////print_time();
-  ////ether.printIp("EtherCard: Netmask - ", ether.netmask);
-  ////print_time();
-  ////ether.printIp("EtherCard: Gateway - ", ether.gwip);
-  ////print_time();
-  ////ether.printIp("EtherCard: DNS - ", ether.dnsip);
+  
+  if (!ether.dnsLookup(NTP_REMOTEHOST))
+  {
+    Serial.println("DNS failed");
+  }
+  uint8_t ntpIp[IP_LEN];
+  ether.copyIp(ntpIp, ether.hisip);
+  ether.printIp("NTP: ", ntpIp);
+  ether.udpServerListenOnPort(&udpReceiveNtpPacket, NTP_LOCALPORT);
+  sendNTPpacket(ntpIp);
 
   #ifdef USE_MDNS
   if(!mdns.begin(HOSTNAME, ether)) {
-    //Serial.println("MDNS error");
+    Serial.println("MDNS FAIL.");
   } else {
-    //Serial.println("Listening on homepi.local");
+    Serial.println("MDNS OK.");
   }
-
-  ////print_time();
   //ENC28J60::enableBroadcast();
   ENC28J60::enableMulticast();
   //ether.enableMulticast();
-  ////Serial.println("EtherCard: Enable broadcast, multicast.");
   #endif
-
-  ////print_time();
-  ////Serial.println("EtherCard: Listening...");
 }
 
 const char page[] PROGMEM =
     "   <meta name=\"HandheldFriendly\" content=\"true\" />\n"
     "   <meta name=\"viewport\" content=\"width=device-width, height=device-height, user-scalable=no\" />\n"
     "   <title>homepi+</title>\n"
-    "   <style>\n"
+    "<style>"
+    ".cssradio input[type=\"radio\"]{display:none}.cssradio input[type=\"checkbox\"]{display:none}.cssradio label{padding:10px;margin:15px 10px 0 0;background:rgba(255,255,255,.8);border-radius:3px;display:inline-block;color:#000;cursor:pointer;border:1px solid #000;width:45%}.cssradio input:checked+label{background:green;font-weight:700;color:#fff;border-color:green}:root{color-scheme:light dark}*{box-sizing:border-box;font-family:\"Helvetica Neue\",Helvetica Neue,serif}.slidercontainer{width:90%}.slider{-webkit-appearance:none;width:91%;height:15px;border-radius:5px;background:#d3d3d3;outline:none;opacity:.7;-webkit-transition:.2s;transition:opacity .2s}.slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:25px;height:25px;border-radius:50%;background:#4CAF50;cursor:pointer}.slider::-moz-range-thumb{width:25px;height:25px;border-radius:50%;background:#4CAF50;cursor:pointer}.container{border-radius:5px;background-color:rgba(0,0,0,.1);padding:20px}.col-25{float:left;width:25%;margin-top:6px}.col-75{float:left;width:75%;margin-top:6px}.row:after{content:\"\";display:table;clear:both}.heading{// padding-top:14px;// padding-bottom:75px;position:relative}.widthel{width:750px}@media screen and (max-width:700px){.col-25,.col-75,input[type=submit]{width:100%;margin-top:0}.copyright{text-align:center}.container,.heading,.widthel{width:100%}}.iconAnchor{text-decoration:none}.iconImg{margin-top:10px;margin-right:15px;border-radius:50%;padding-top:4px;border:1px solid #000;width:40px;height:40px}"
+    "</style>"
+    /*"   <style>\n"
     "     .cssradio input[type=\"radio\"]{display: none;}\n"
     "     .cssradio input[type=\"checkbox\"]{display: none;}\n"
     "     .cssradio label{padding: 10px; margin: 15px 10px 0 0;\n"
@@ -344,7 +415,6 @@ const char page[] PROGMEM =
     "     cursor: pointer; border: 1px solid #000; width: 46%}\n"
     "     .cssradio input:checked + label {\n"
     "     background: green; font-weight:bold; color: white; border-color: green;}\n"
-    "     /* Enables dark mode support in Safari */\n"
     "     :root {\n"
     "       color-scheme: light dark;\n"
     "     }\n"
@@ -355,10 +425,9 @@ const char page[] PROGMEM =
     "     }\n"
     "     \n"
     "     .slidercontainer {\n"
-    "       width: 100%; /* Width of the outside container */\n"
+    "       width: 100%;\n"
     "     }\n"
     "     \n"
-    "     /* The slider itself */\n"
     "     .slider {\n"
     "       -webkit-appearance: none;\n"
     "       width: 91%;\n"
@@ -390,7 +459,7 @@ const char page[] PROGMEM =
     "     }\n"
     "     .container {\n"
     "       border-radius: 5px;\n"
-    "       background-color: rgba(0, 0, 0, 0.1);/*#f2f2f2;*/\n"
+    "       background-color: rgba(0, 0, 0, 0.1);\n"
     "       padding: 20px;\n"
     "     }\n"
     "     \n"
@@ -406,7 +475,6 @@ const char page[] PROGMEM =
     "       margin-top: 6px;\n"
     "     }\n"
     "     \n"
-    "     /* Clear floats after the columns */\n"
     "     .row:after {\n"
     "       content: \"\";\n"
     "       display: table;\n"
@@ -449,7 +517,7 @@ const char page[] PROGMEM =
     "       width: 40px;\n"
     "       height: 40px;\n"
     "     }\n"
-    "   </style>\n"
+    "   </style>\n"*/
     "  </head>\n"
     "  <body>\n"
     "   <div class=\"container widthel\">\n"
@@ -550,17 +618,19 @@ const char topC[] PROGMEM =
     "       document.getElementById('r2').checked = $D;\n"
     ;
 
+/*
 const char topD[] PROGMEM =
     "       document.getElementById('a1').checked = $D;\n"
     "       document.getElementById('a2').checked = $D;\n"
     ;
-     
+*/
+    
 const char topZ[] PROGMEM =
     "     }\n"
     "   </script>\n"
     ;
 
-void ether_get()
+void ether_get(bool external, bool authed = false)
 {
   char _brightness = ddc_get(DDC_BRIGHTNESS);
   if (_brightness == -1) _brightness = 0;
@@ -568,104 +638,121 @@ void ether_get()
   if (_volume == -1) _volume = 0;
   ether.httpServerReplyAck();
 
-  memcpy_P(
-    ether.tcpOffset(), 
-    top, 
-    sizeof top
-  );
-  ether.httpServerReply_with_flags(
-    sizeof top - 1,
-    TCP_FLAGS_ACK_V
-  );
-  
-  buffer = ether.tcpOffset();
-  buffer.emit_p(
-    topA,
-    _brightness,
-    _brightness
-  );
-  ether.httpServerReply_with_flags(
-    buffer.position(), 
-    TCP_FLAGS_ACK_V
-  );
-  buffer = ether.tcpOffset();
-  buffer.emit_p(
-    topB,
-    _volume,
-    _volume
-  );
-  ether.httpServerReply_with_flags(
-    buffer.position(), 
-    TCP_FLAGS_ACK_V
-  );
-  buffer = ether.tcpOffset();
-  buffer.emit_p(
-    topC,
-    //pin_hdmi,
-    pin_desklamp,
-    pin_relay
-  );
-  ether.httpServerReply_with_flags(
-    buffer.position(), 
-    TCP_FLAGS_ACK_V
-  );
-  /*buffer = ether.tcpOffset();
-  buffer.emit_p(
-    topD,
-    pin_ainput == 0,
-    pin_ainput == 1
-  );
-  ether.httpServerReply_with_flags(
-    buffer.position(), 
-    TCP_FLAGS_ACK_V
-  );*/
-  
-  memcpy_P(
-    ether.tcpOffset(), 
-    topZ, 
-    sizeof topZ
-  );
-  ether.httpServerReply_with_flags(
-    sizeof topZ - 1,
-    TCP_FLAGS_ACK_V
-  );
-
-  for (size_t i = 0; i < sizeof page; i = i + ETHER_MINCHUNKLEN)
+  if (external && !authed)
   {
-    byte is_last = i + ETHER_MINCHUNKLEN > sizeof page;
-    /*
-    print_time();
-    Serial.print("EtherCard: Sending chunk: ");
-    if (!is_last)
-    {
-      Serial.print(i);
-      Serial.print(" - ");
-      Serial.println(i + ETHER_MINCHUNKLEN);
-    }
-    else
-    {
-      Serial.print(i);
-      Serial.print(" - ");
-      Serial.println(i + ETHER_MINCHUNKLEN - (i + ETHER_MINCHUNKLEN - sizeof page));
-    }
-    */
+    buffer = ether.tcpOffset(); 
+    buffer.emit_p(PSTR(
+      "HTTP/1.0 401 Unauthorized\r\n"
+      "WWW-Authenticate: Basic realm='none'\r\n"
+      "\r\n"
+      "Access denied."
+    ));
+    ether.httpServerReply_with_flags(
+      buffer.position(), 
+      TCP_FLAGS_ACK_V | TCP_FLAGS_FIN_V
+    );
+  }
+  else
+  {
     memcpy_P(
       ether.tcpOffset(), 
-      page + i, 
-      is_last ?
-        ETHER_MINCHUNKLEN - (i + ETHER_MINCHUNKLEN - sizeof page) :
-        ETHER_MINCHUNKLEN
+      top, 
+      sizeof top
     );
     ether.httpServerReply_with_flags(
-      is_last ?
-        ETHER_MINCHUNKLEN - (i + ETHER_MINCHUNKLEN - sizeof page) :
-        ETHER_MINCHUNKLEN
-      ,
-      TCP_FLAGS_ACK_V | (is_last ?
-        TCP_FLAGS_FIN_V :
-        0
-      )
+      sizeof top - 1,
+      TCP_FLAGS_ACK_V
     );
+    
+    buffer = ether.tcpOffset();
+    buffer.emit_p(
+      topA,
+      _brightness,
+      _brightness
+    );
+    ether.httpServerReply_with_flags(
+      buffer.position(), 
+      TCP_FLAGS_ACK_V
+    );
+    buffer = ether.tcpOffset();
+    buffer.emit_p(
+      topB,
+      _volume,
+      _volume
+    );
+    ether.httpServerReply_with_flags(
+      buffer.position(), 
+      TCP_FLAGS_ACK_V
+    );
+    buffer = ether.tcpOffset();
+    buffer.emit_p(
+      topC,
+      //pin_hdmi,
+      pin_desklamp,
+      pin_relay
+    );
+    ether.httpServerReply_with_flags(
+      buffer.position(), 
+      TCP_FLAGS_ACK_V
+    );
+    /*buffer = ether.tcpOffset();
+    buffer.emit_p(
+      topD,
+      pin_ainput == 0,
+      pin_ainput == 1
+    );
+    ether.httpServerReply_with_flags(
+      buffer.position(), 
+      TCP_FLAGS_ACK_V
+    );*/
+    
+    memcpy_P(
+      ether.tcpOffset(), 
+      topZ, 
+      sizeof topZ
+    );
+    ether.httpServerReply_with_flags(
+      sizeof topZ - 1,
+      TCP_FLAGS_ACK_V
+    );
+  
+    for (size_t i = 0; i < sizeof page; i = i + ETHER_MINCHUNKLEN)
+    {
+      byte is_last = i + ETHER_MINCHUNKLEN > sizeof page;
+      /*
+      print_time();
+      Serial.print("EtherCard: Sending chunk: ");
+      if (!is_last)
+      {
+        Serial.print(i);
+        Serial.print(" - ");
+        Serial.println(i + ETHER_MINCHUNKLEN);
+      }
+      else
+      {
+        Serial.print(i);
+        Serial.print(" - ");
+        Serial.println(i + ETHER_MINCHUNKLEN - (i + ETHER_MINCHUNKLEN - sizeof page));
+      }
+      */
+      memcpy_P(
+        ether.tcpOffset(), 
+        page + i, 
+        is_last ?
+          ETHER_MINCHUNKLEN - (i + ETHER_MINCHUNKLEN - sizeof page) :
+          ETHER_MINCHUNKLEN
+      );
+      ether.httpServerReply_with_flags(
+        is_last ?
+          ETHER_MINCHUNKLEN - (i + ETHER_MINCHUNKLEN - sizeof page) :
+          ETHER_MINCHUNKLEN
+        ,
+        TCP_FLAGS_ACK_V | (is_last ?
+          TCP_FLAGS_FIN_V :
+          0
+        )
+      );
+    }
   }
 }
 
@@ -679,6 +766,12 @@ const char redirect_mdns[] PROGMEM =
     "HTTP/1.0 302 Found\r\n"
     "Location: http://$S$S/\r\n"
     "\r\n"
+    ;
+
+const char redirect_external[] PROGMEM =
+    "HTTP/1.0 302 Found\r\n"
+    "Location: http://" EXTERNAL_ADDR
+    "\r\n\r\n"
     ;
 
 const char post_ok[] PROGMEM =
@@ -1023,62 +1116,145 @@ void loop()
  
   if (pos) 
   {
+    // this is necessary when millis will eventually overflow
+    // unfortunately, it does not work at the moment, apparently,
+    // as it hangs when querying the DNS... ideally, one would
+    // reset the board, one time in a month is ok I think
+    /*if (prev_millis > millis())
+    {
+      if (ether.dnsLookup(NTP_REMOTEHOST))
+      {
+        uint8_t ntpIp[IP_LEN];
+        ether.copyIp(ntpIp, ether.hisip);
+        ether.printIp("NTP: ", ntpIp);
+        ether.udpServerResumeListenOnPort(NTP_LOCALPORT);
+        sendNTPpacket(ntpIp);
+        prev_millis = millis();
+      }
+    }*/
     const char* packet = (const char*)ether.tcpOffset();
-    if (packet[0] == 'G' && packet[1] == 'E' && packet[2] == 'T') {
-      ////print_time();
-      ////Serial.println("EtherCard: Servicing GET.");
-      ether_get();
+    
+    bool is_external = false;
+    bool authed = false;
+    uint8_t* ip_src = ether.buffer + 0x1A;
+    if (ether.compareAddresses(ip_src, ether.gwip))
+    {
+      is_external = true;
+
+      char* auth_data = strstr(packet, "Authorization: Basic ");
+      if (auth_data)
+      {
+        char* auth_end = strchr(auth_data, '\r');
+        if (auth_end)
+        {
+          auth_end[0] = 0;
+          char* pass = auth_data + 21;
+          size_t len = auth_end - pass;
+          int decodedLen = base64_dec_len(pass, len);
+          char decoded[decodedLen + 1];
+          memset(decoded, 0, decodedLen + 1);
+          base64_decode(decoded, pass, len);
+          unsigned long t = epoch + (millis() / 1000) - millis_offset / 1000;
+          char* code = totp.getCode(t);
+          decoded[strchr(decoded, ':') - decoded] = 0;
+          Serial.print(t);
+          Serial.print(" - ");
+          Serial.print(attempts);
+          Serial.print(" - ");
+          Serial.print(decoded);
+          Serial.print(" - ");
+          Serial.println(code);
+          if (!strcmp(decoded, code))
+          {
+            unsigned int ccode = atoi(code);
+            if (ccode != last_code)
+            {
+              authed = true;
+              attempts = 0;
+              last_code = ccode;
+            }
+            else if (attempts < MAX_ATTEMPTS)
+            {
+              authed = true;
+              attempts++;
+            }
+            else
+            {
+              attempts++;
+            }
+          }
+          auth_end[0] = '\r';
+        }
+      }
+    }
+    
+    if (packet[0] == 'G' && packet[1] == 'E' && packet[2] == 'T') {    
+      ether_get(is_external, authed);
       p_ok = 0;
       p_i = 0;
     } else {
-      ether.setBufferPtr(pos);
-      byte b, b1 = 0, b2 = 0, b3 = 0;
-      while(ether.packetPayloadSize>0)
+      if (!is_external || (is_external && authed))
       {
-        b3 = b2;
-        b2 = b1;
-        b1 = b;
-        b=ether.readByte();
-        if (p_ok)
+        ether.setBufferPtr(pos);
+        byte b, b1 = 0, b2 = 0, b3 = 0;
+        while(ether.packetPayloadSize>0)
         {
-          post_data[p_i] = b;
-          p_i++;
+          b3 = b2;
+          b2 = b1;
+          b1 = b;
+          b=ether.readByte();
+          if (p_ok)
+          {
+            post_data[p_i] = b;
+            p_i++;
+          }
+          if (b == '\n' && b1 == '\r' && b2 == '\n' && b1 == '\r')
+          {
+            p_ok = 1;
+          }
         }
-        if (b == '\n' && b1 == '\r' && b2 == '\n' && b1 == '\r')
+        post_data[p_i] = 0;
+        if (p_i != 0)
         {
-          p_ok = 1;
+          ether_post(post_data);
+    
+          delay(100);
+    
+          buffer = ether.tcpOffset();
+          if (is_external)
+          {
+            buffer.emit_p(
+              redirect_external,
+              HOSTNAME,
+              ".local"
+            );
+          }
+          else
+          {
+  #ifdef USE_MDNS
+          buffer.emit_p(
+            redirect_mdns,
+            HOSTNAME,
+            ".local"
+          );
+  #else
+          buffer.emit_p(
+            redirect,
+            ether.myip[0],
+            ether.myip[1],
+            ether.myip[2],
+            ether.myip[3]
+          );
+  #endif
+          }
+          ether.httpServerReply_with_flags(
+            buffer.position(), 
+            TCP_FLAGS_ACK_V | TCP_FLAGS_FIN_V
+          );
+  
+          p_ok = 0;
+          p_i = 0;
         }
-      }
-      post_data[p_i] = 0;
-      if (p_i != 0)
-      {
-        ether_post(post_data);
-  
-        delay(100);
-  
-        buffer = ether.tcpOffset();
-#ifdef USE_MDNS
-        buffer.emit_p(
-          redirect_mdns,
-          HOSTNAME,
-          ".local"
-        );
-#else
-        buffer.emit_p(
-          redirect,
-          ether.myip[0],
-          ether.myip[1],
-          ether.myip[2],
-          ether.myip[3]
-        );
-#endif
-        ether.httpServerReply_with_flags(
-          buffer.position(), 
-          TCP_FLAGS_ACK_V | TCP_FLAGS_FIN_V
-        );
-
-        p_ok = 0;
-        p_i = 0;
       }
     }
   }
