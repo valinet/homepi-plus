@@ -75,13 +75,14 @@ byte pin_ainput = 0;
 #define ETHER_MINCHUNKLEN ETHER_BUFLEN - 20
 #define POST_VAL_SIZE 6
 
-static byte mymac[] = { 0x74, 0x69, 0x69, 0x2D, 0x30, 0x31 };
-const static uint8_t ip[] = {192,168,105,24};
+static byte mymac[] = { 0x74, 0x69, 0x69, 0x2D, 0x30, 0x31 }; //0x31
+const static uint8_t ip[] = {192,168,105,24}; //24
 const static uint8_t gateway[] = {192,168,105,1};
 const static uint8_t mask[] = {255,255,255,0};
 const static uint8_t dns[] = {8,8,8,8}; // Google DNS resolver
 const static uint8_t ntpIp[] = {216,239,35,12}; // Google NTP server
 #define HOSTNAME "homepi"
+#define SERVICE_NAME "_valinet._tcp"
 
 #define HOSTNAME_LEN 30
 char hostname[HOSTNAME_LEN];
@@ -388,8 +389,16 @@ void setup()
   sendNTPpacket(ntpIp);
 
   #ifdef USE_MDNS
-  if(!mdns.begin(HOSTNAME, ether)) {
-    Serial.println("MDNS FAIL.");
+  byte r = mdns.begin(
+    ether, 
+    HOSTNAME,
+    SERVICE_NAME,
+    HTTP_PORT,
+    0x0000FFFF
+  );
+  if(r) {
+    Serial.print("MDNS FAIL: ");
+    Serial.println(r);
   } else {
     Serial.println("MDNS OK.");
   }
