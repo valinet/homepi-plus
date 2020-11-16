@@ -360,7 +360,7 @@ void setup()
   // enable i2c
   Wire.begin();
   Wire.setWireTimeout();
-
+  
   if (ether.begin(sizeof Ethernet::buffer, mymac) == 0)
   {
   }
@@ -373,15 +373,15 @@ void setup()
 
   ether.hisport = HTTP_PORT;
   ether.printIp("EtherCard: IP - ", ether.myip);
-
+  
   while (!ether.isLinkUp())
   {
-    delay(100);
+    delay(10);
   }
-  while(ether.clientWaitingDns())
+  while(ether.clientWaitingGw())
   {
     ether.packetLoop(ether.packetReceive());
-    delay(100);
+    delay(10);
   }
   
   ether.printIp("NTP: ", ntpIp);
@@ -1114,7 +1114,6 @@ void loop()
 {
   word len = ether.packetReceive();
   word pos = ether.packetLoop(len);
- 
   if (pos) 
   {
     // this is necessary when millis will eventually overflow
@@ -1134,7 +1133,6 @@ void loop()
       }
     }*/
     const char* packet = (const char*)ether.tcpOffset();
-
     char* hostloc = strstr(packet, "Host: ");
     if (hostloc)
     {
@@ -1161,14 +1159,12 @@ void loop()
         fin[0] = ' ';
       }
     }
-    
     bool is_external = false;
     bool authed = false;
     uint8_t* ip_src = ether.buffer + 0x1A;
     if (ether.compareAddresses(ip_src, ether.gwip))
     {
       is_external = true;
-
       char* addr = strstr(packet, " /");
       if (addr)
       {
@@ -1249,4 +1245,5 @@ void loop()
       }
     }
   }
+  delay(10);
 }
