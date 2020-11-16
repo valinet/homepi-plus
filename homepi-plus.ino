@@ -307,6 +307,8 @@ void setup()
   while (!Serial);
   Serial.println("\n");
 
+  delay(5000);
+
   digitalWrite(SDA, LOW);
   digitalWrite(SCL, LOW);
 
@@ -318,9 +320,9 @@ void setup()
   port0 &= ~(1 << CTL_PIN_AUDIO0);
   port0 &= ~(1 << CTL_PIN_HDMI0);
   pin_hdmi = 0;
-  port0 |= (1 << CTL_PIN_DESKLAMP0);
+  port0 &= ~(1 << CTL_PIN_DESKLAMP0);
   pin_desklamp = 0;
-  port0 |= (1 << CTL_PIN_RELAY0);
+  port0 &= ~(1 << CTL_PIN_RELAY0);
   pin_relay = 0;
   port0 |= (1 << CTL_PIN_IR_LIGHTBULB0);
   port1 |= (1 << CTL_PIN_IR_NIGHTBULB1);
@@ -982,7 +984,7 @@ void ether_post(char* packet)
   {
     if (!strcmp(r1, "on"))
     {
-      port0 &= ~(1 << CTL_PIN_DESKLAMP0);
+      port0 |= (1 << CTL_PIN_DESKLAMP0);
       shift_ports();
       
       /*digitalWrite(CTL_PIN_DESKLAMP, HIGH);*/
@@ -990,7 +992,7 @@ void ether_post(char* packet)
     }
     else
     {
-      port0 |= (1 << CTL_PIN_DESKLAMP0);
+      port0 &= ~(1 << CTL_PIN_DESKLAMP0);
       shift_ports();
       
       /*digitalWrite(CTL_PIN_DESKLAMP, LOW);*/
@@ -1001,7 +1003,7 @@ void ether_post(char* packet)
   {
     if (!strcmp(r2, "on"))
     {
-      port0 &= ~(1 << CTL_PIN_RELAY0);
+      port0 |= (1 << CTL_PIN_RELAY0);
       shift_ports();
       
       /*digitalWrite(CTL_PIN_RELAY, HIGH);*/
@@ -1009,7 +1011,7 @@ void ether_post(char* packet)
     }
     else
     {
-      port0 |= (1 << CTL_PIN_RELAY0);
+      port0 &= ~(1 << CTL_PIN_RELAY0);
       shift_ports();
       
       /*digitalWrite(CTL_PIN_RELAY, LOW);*/
