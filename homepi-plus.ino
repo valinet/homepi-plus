@@ -19,7 +19,9 @@
  * A1 - IR (-) Lightbulb
  * A2 - IR (-) Nightbulb
  */
-
+ 
+#include <avr/wdt.h>
+#include <EEPROM.h>
 // i2c
 #include "src/ArduinoCore-avr/libraries/Wire/src/Wire.h"
 // IR
@@ -37,6 +39,7 @@
 // header file containing secret for TOTP
 #include "C:\KEYS\key.h" // contains KEY define
 
+int reset_pin = 9;
 int latchPin = 4;
 int clockPin = 2;
 int dataPin = 5;
@@ -133,6 +136,11 @@ uint8_t attempts = 0;
 // previous TOTP code generated (helps in resetting above
 // counter)
 unsigned int last_code = 0;
+
+#define EEPROM_DESKLAMP 0
+#define RESPRING_DELAY 60 // in seconds
+
+void(*reset) (void) = 0;
 
 ////void print_time()
 ////{
@@ -300,15 +308,26 @@ char ddc_get(byte what)
   }
   return -1;
 }
-
+int mcusr = 0;
 void setup() 
-{
+{ 
+  mcusr = MCUSR;
+  MCUSR = 0;
+  wdt_disable();
+  wdt_enable(WDTO_8S);
+  
+  digitalWrite(reset_pin, HIGH);
+  delay(50);
+  pinMode(reset_pin, OUTPUT);
+  digitalWrite(reset_pin, HIGH);
+  
   Serial.begin(9600);
   while (!Serial);
   Serial.println("\n");
-
-  delay(5000);
-
+  Serial.print("MCUSR: ");
+  Serial.println(mcusr);
+  Serial.println(millis());  
+  
   digitalWrite(SDA, LOW);
   digitalWrite(SCL, LOW);
 
@@ -320,8 +339,28 @@ void setup()
   port0 &= ~(1 << CTL_PIN_AUDIO0);
   port0 &= ~(1 << CTL_PIN_HDMI0);
   pin_hdmi = 0;
-  port0 &= ~(1 << CTL_PIN_DESKLAMP0);
-  pin_desklamp = 0;
+  if (!mcusr || (mcusr & _BV(WDRF)))
+  {
+    pin_desklamp = EEPROM.read(EEPROM_DESKLAMP);
+    if (pin_desklamp)
+    {
+      port0 |= (1 << CTL_PIN_DESKLAMP0);
+    }
+    else
+    {
+      port0 &= ~(1 << CTL_PIN_DESKLAMP0);
+    }
+  }
+  else
+  {
+    pin_desklamp = EEPROM.read(EEPROM_DESKLAMP);
+    if (pin_desklamp)
+    {
+      EEPROM.write(EEPROM_DESKLAMP, 0);
+    }
+    port0 &= ~(1 << CTL_PIN_DESKLAMP0);
+    pin_desklamp = 0;
+  }
   port0 &= ~(1 << CTL_PIN_RELAY0);
   pin_relay = 0;
   port0 |= (1 << CTL_PIN_IR_LIGHTBULB0);
@@ -333,31 +372,38 @@ void setup()
   pinMode(oePin, OUTPUT);
   digitalWrite(oePin, LOW);
 
-  port0 &= ~(1 << CTL_PIN_IR_LIGHTBULB0);
-  shift_ports();
-  irsend.send(OSRAM_LIGHT_OFF, 32);
-  delay(50);
-  irsend.send(OSRAM_LIGHT_OFF, 32);
-  delay(50);
-  irsend.send(OSRAM_LIGHT_OFF, 32);
-  port0 |= (1 << CTL_PIN_IR_LIGHTBULB0);
-  shift_ports();
-  
-  port1 &= ~(1 << CTL_PIN_IR_NIGHTBULB1);
-  shift_ports();
-  irsend.send(OSRAM_LIGHT_OFF, 32);
-  delay(50);
-  irsend.send(OSRAM_LIGHT_OFF, 32);
-  delay(50);
-  irsend.send(OSRAM_LIGHT_OFF, 32);
-  port1 |= (1 << CTL_PIN_IR_NIGHTBULB1);
-  shift_ports();
-  
-  port1 &= ~(1 << CTL_PIN_DELOCK1);
-  shift_ports();
-  irsend.send(DELOCK_POWER, 32);
-  port1 |= (1 << CTL_PIN_DELOCK1);
-  shift_ports();
+  if (mcusr && !(mcusr & _BV(WDRF)))
+  {
+    port0 &= ~(1 << CTL_PIN_IR_LIGHTBULB0);
+    shift_ports();
+    irsend.send(OSRAM_LIGHT_OFF, 32);
+    delay(50);
+    irsend.send(OSRAM_LIGHT_OFF, 32);
+    delay(50);
+    irsend.send(OSRAM_LIGHT_OFF, 32);
+    port0 |= (1 << CTL_PIN_IR_LIGHTBULB0);
+    shift_ports();
+    
+    port1 &= ~(1 << CTL_PIN_IR_NIGHTBULB1);
+    shift_ports();
+    irsend.send(OSRAM_LIGHT_OFF, 32);
+    delay(50);
+    irsend.send(OSRAM_LIGHT_OFF, 32);
+    delay(50);
+    irsend.send(OSRAM_LIGHT_OFF, 32);
+    port1 |= (1 << CTL_PIN_IR_NIGHTBULB1);
+    shift_ports();
+    
+    port1 &= ~(1 << CTL_PIN_DELOCK1);
+    shift_ports();
+    irsend.send(DELOCK_POWER, 32);
+    port1 |= (1 << CTL_PIN_DELOCK1);
+    shift_ports();
+  }
+  else
+  {
+    delay(1000);
+  }
   
   // enable i2c
   Wire.begin();
@@ -375,15 +421,46 @@ void setup()
 
   ether.hisport = HTTP_PORT;
   ether.printIp("EtherCard: IP - ", ether.myip);
-  
-  while (!ether.isLinkUp())
+
+  int timeout = 0;
+  while (!ether.isLinkUp() && timeout < 2000)
   {
-    delay(10);
+    if (!(timeout % 20))
+    {
+      Serial.print("timeout");
+      Serial.print(1);
+      Serial.print(": ");
+      Serial.println(timeout);
+    }
+    timeout++;
+    delay(1);
   }
-  while(ether.clientWaitingGw())
+  if (!ether.isLinkUp())
   {
-    ether.packetLoop(ether.packetReceive());
+    digitalWrite(reset_pin, LOW);
     delay(10);
+    reset();
+  }
+  
+  timeout = 1;
+  while(ether.clientWaitingGw() && timeout < 3000)
+  {
+    if (!(timeout % 20))
+    {
+      Serial.print("timeout");
+      Serial.print(2);
+      Serial.print(": ");
+      Serial.println(timeout);
+    }
+    ether.packetLoop(ether.packetReceive());
+    timeout++;
+    delay(1);
+  }
+  if (ether.clientWaitingGw())
+  {
+    digitalWrite(reset_pin, LOW);
+    delay(10);
+    reset();
   }
   
   ether.printIp("NTP: ", ntpIp);
@@ -408,15 +485,20 @@ void setup()
   ENC28J60::enableMulticast();
   //ether.enableMulticast();
   #endif
+
+  wdt_reset();
 }
 
+// of course this can be minified but I leave it as is to have some extra space when time will require so
 const char page[] PROGMEM =
     "   <meta name=\"HandheldFriendly\" content=\"true\" />\n"
     "   <meta name=\"viewport\" content=\"width=device-width, height=device-height, user-scalable=no\" />\n"
+    "   <meta name=\"apple-mobile-web-app-capable\" content=\"yes\">\n"
+    "   <link rel=\"apple-touch-icon\" href=\"https://gist.githubusercontent.com/valinet/f54f5d965b3bca744a1b247367351346/raw/a.png\">\n"
     "   <title>homepi+</title>\n"
-    "<style>"
-    ".cssradio input[type=\"radio\"]{display:none}.cssradio input[type=\"checkbox\"]{display:none}.cssradio label{padding:10px;margin:15px 10px 0 0;background:rgba(255,255,255,.8);border-radius:3px;display:inline-block;color:#000;cursor:pointer;border:1px solid #000;width:45%}.cssradio input:checked+label{background:green;font-weight:700;color:#fff;border-color:green}:root{color-scheme:light dark}*{box-sizing:border-box;font-family:\"Helvetica Neue\",Helvetica Neue,serif}.slidercontainer{width:90%}.slider{-webkit-appearance:none;width:91%;height:15px;border-radius:5px;background:#d3d3d3;outline:none;opacity:.7;-webkit-transition:.2s;transition:opacity .2s}.slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:25px;height:25px;border-radius:50%;background:#4CAF50;cursor:pointer}.slider::-moz-range-thumb{width:25px;height:25px;border-radius:50%;background:#4CAF50;cursor:pointer}.container{border-radius:5px;background-color:rgba(0,0,0,.1);padding:20px}.col-25{float:left;width:25%;margin-top:6px}.col-75{float:left;width:75%;margin-top:6px}.row:after{content:\"\";display:table;clear:both}.heading{// padding-top:14px;// padding-bottom:75px;position:relative}.widthel{width:750px}@media screen and (max-width:700px){.col-25,.col-75,input[type=submit]{width:100%;margin-top:0}.copyright{text-align:center}.container,.heading,.widthel{width:100%}}.iconAnchor{text-decoration:none}.iconImg{margin-top:10px;margin-right:15px;border-radius:50%;padding-top:4px;border:1px solid #000;width:40px;height:40px}"
-    "</style>"
+    "   <style>"
+    "   .cssradio label{margin-left: 10px;}.cssradio input[type=\"radio\"]{display:none}.cssradio input[type=\"checkbox\"]{display:none}.cssradio label{padding:10px;margin:15px 0 0 0;background:rgba(255,255,255,.8);border-radius:3px;display:inline-block;color:#000;cursor:pointer;border:1px solid #000;width:48%}.cssradio input:checked+label{background:#6d56ff;font-weight:700;color:#fff;border-color:#000}:root{color-scheme:light dark}*{box-sizing:border-box;font-family:\"Helvetica Neue\",serif}.slidercontainer{width:96%}.slider{-webkit-appearance:none;width:102%;height:15px;border-radius:5px;background:#d3d3d3;outline:none;opacity:.7;-webkit-transition:.2s;transition:opacity .2s}.slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:25px;height:25px;border-radius:50%;background:#6d56ff;cursor:pointer}.slider::-moz-range-thumb{width:25px;height:25px;border-radius:50%;background:#6d56ff;cursor:pointer}.container{border-radius:5px;background-color:rgba(0,0,0,.1);padding:20px}.col-25{float:left;width:25%;margin-top:6px}.col-75{float:left;width:75%;margin-top:6px}.row:after{content:\"\";display:table;clear:both}.heading{// padding-top:14px;// padding-bottom:75px;position:relative}.widthel{width:750px}@media screen and (max-width:700px){.col-25,.col-75,input[type=submit]{width:100%;margin-top:0}.copyright{text-align:center}.container,.heading,.widthel{width:100%}}.iconAnchor{text-decoration:none}.iconImg{margin-top:10px;margin-right:15px;border-radius:50%;padding-top:4px;border:1px solid #000;width:40px;height:40px}.silentLink{color:inherit;text-decoration:inherit}"
+    "   </style>\n"
     /*"   <style>\n"
     "     .cssradio input[type=\"radio\"]{display: none;}\n"
     "     .cssradio input[type=\"checkbox\"]{display: none;}\n"
@@ -441,7 +523,7 @@ const char page[] PROGMEM =
     "     \n"
     "     .slider {\n"
     "       -webkit-appearance: none;\n"
-    "       width: 91%;\n"
+    "       width: 102%;\n"
     "       height: 15px;\n"
     "       border-radius: 5px;\n"
     "       background: #d3d3d3;\n"
@@ -528,54 +610,51 @@ const char page[] PROGMEM =
     "       width: 40px;\n"
     "       height: 40px;\n"
     "     }\n"
+    "     .silentLink {\n"
+    "       color: inherit;\n"
+    "       text-decoration: inherit;\n"
+    "     }\n"
     "   </style>\n"*/
     "  </head>\n"
     "  <body>\n"
     "   <div class=\"container widthel\">\n"
     "     <form id=\"fm\" method=get>\n"
-    "       <h2>\n"
-    "         homepi+\n"
-    "       </h2>\n"
+    "       <a class=\"silentLink\" href=\"javascript:location.reload()\">\n"
+    "         <h2 style=\"margin-top: 0\">homepi+</h2>\n"
+    "       </a>\n"
     "       <input name=\"ra\" style=\"display: none\" value=\"0\">\n"
     "       <div class=\"cssradio\">\n"
     "         PC<br>\n"
-    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"pcOnOff\" name=\"pc\" value=\"onoff\"><label for=\"pcOnOff\">On / Off</label>\n"
+    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"pcOnOff\" name=\"pc\" value=\"onoff\"><label for=\"pcOnOff\">On / Off</label>&nbsp;\n"
     "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"pcForce\" name=\"pc\" value=\"force\"><label for=\"pcForce\">Force Off</label>\n"
     "       </div>\n"
     "       <br>\n"
     "       <div class=\"cssradio\">\n"
     "         ThinkPad<br>\n"
-    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"tpOnOff\" name=\"tp\" value=\"onoff\"><label for=\"tpOnOff\">On / Off</label>\n"
+    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"tpOnOff\" name=\"tp\" value=\"onoff\"><label for=\"tpOnOff\">On / Off</label>&nbsp;\n"
     "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"tpForce\" name=\"tp\" value=\"force\"><label for=\"tpForce\">Force Off</label>\n"
     "       </div>\n"
     "       <br>\n"
     "       <div class=\"cssradio\">\n"
-    "         Lightbulb<br>\n"
-    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"roomOn\" name=\"roomLight\" value=\"on\"><label for=\"roomOn\">On</label>\n"
+    "         <a class=\"silentLink\" href=\"javascript:location.reload()\">Lightbulb</a><br>\n"
+    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"roomOn\" name=\"roomLight\" value=\"on\"><label for=\"roomOn\">On</label>&nbsp;\n"
     "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"roomOff\" name=\"roomLight\" value=\"off\"><label for=\"roomOff\">Off</label>\n"
     "       </div>\n"
     "       <br>\n"
     "       <div class=\"cssradio\">\n"
-    "         Night bulb<br>\n"
-    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"smOn\" name=\"smLight\" value=\"on\"><label for=\"smOn\">On</label>\n"
+    "         <a class=\"silentLink\" href=\"javascript:location.reload()\">Night bulb</a><br>\n"
+    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"smOn\" name=\"smLight\" value=\"on\"><label for=\"smOn\">On</label>&nbsp;\n"
     "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"smOff\" name=\"smLight\" value=\"off\"><label for=\"smOff\">Off</label>\n"
     "       </div>\n"
     "       <br>\n"
     "       <div class=\"cssradio\">\n"
-    "         Monitor<br>\n"
+    "         <a class=\"silentLink\" href=\"javascript:location.reload()\">Monitor</a><br>\n"
     //"         <input onclick=\"if (document.getElementById('hdmi').checked) { document.getElementById('hdmi').checked = true; document.getElementById('hdmi').value = 'on'; document.forms[0].submit(); } else { document.getElementById('hdmi').checked = true; document.getElementById('hdmi').value = 'off'; document.forms[0].submit(); }\" type=\"checkbox\" id=\"hdmi\" name=\"hdmi\" value=\"0\"><label for=\"hdmi\">On / Off</label>\n"
-    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"nok\" name=\"nok\" value=\"1\"><label for=\"nok\">Audio</label>\n"
+    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"nok\" name=\"nok\" value=\"1\"><label for=\"nok\">Audio</label>&nbsp;\n"
     "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"HDMITP\" name=\"src\" value=\"tp\"><label for=\"HDMITP\">ThinkPad</label>\n"
-    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"HDMIPC\" name=\"src\" value=\"pc\"><label for=\"HDMIPC\">PC</label>\n"
+    "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"HDMIPC\" name=\"src\" value=\"pc\"><label for=\"HDMIPC\">PC</label>&nbsp;\n"
     "         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"HDMIRP\" name=\"src\" value=\"ch\"><label for=\"HDMIRP\">Chromecast</label>\n"
     //"         <input onclick=\"this.form.submit()\" type=\"radio\" id=\"HDMIPS\" name=\"src\" value=\"ps\"><label for=\"HDMIPS\">PlayStation 3</label>\n"
-    "       </div>\n"
-    "       <br>\n"
-    "       <div class=\"sliderContainer\">\n"
-    "         Volume:\n"
-    "         <output id=\"volumeValue\">0</output>\n"
-    "         <br><br>\n"
-    "         <input name=\"vol\" type=\"range\" min=\"0\" max=\"100\" value=0 class=\"slider\" id=\"volumeSlider\" oninput=\"volumeValue.value = volumeSlider.value\" onchange=\"ra.value = 1; this.form.submit()\">\n"
     "       </div>\n"
     "       <br>\n"
     "       <div class=\"sliderContainer\">\n"
@@ -585,9 +664,16 @@ const char page[] PROGMEM =
     "         <input name=\"br\" type=\"range\" min=\"0\" max=\"100\" value=0 class=\"slider\" id=\"brightnessSlider\" oninput=\"brightnessValue.value = brightnessSlider.value\" onchange=\"ra.value = 2; this.form.submit()\">\n"
     "       </div>\n"
     "       <br>\n"
+    "       <div class=\"sliderContainer\">\n"
+    "         Volume:\n"
+    "         <output id=\"volumeValue\">0</output>\n"
+    "         <br><br>\n"
+    "         <input name=\"vol\" type=\"range\" min=\"0\" max=\"100\" value=0 class=\"slider\" id=\"volumeSlider\" oninput=\"volumeValue.value = volumeSlider.value\" onchange=\"ra.value = 1; this.form.submit()\">\n"
+    "       </div>\n"
+    "       <br>\n"
     "       <div class=\"cssradio\">\n"
     "         Control<br>\n"
-    "         <input onclick=\"if (document.getElementById('r1').checked) { document.getElementById('r1').checked = true; document.getElementById('r1').value = 'on'; document.forms[0].submit(); } else { document.getElementById('r1').checked = true; document.getElementById('r1').value = 'off'; document.forms[0].submit(); }\" type=\"checkbox\" id=\"r1\" name=\"r1\" value=\"0\"><label for=\"r1\">Desk lamp</label>\n"
+    "         <input onclick=\"if (document.getElementById('r1').checked) { document.getElementById('r1').checked = true; document.getElementById('r1').value = 'on'; document.forms[0].submit(); } else { document.getElementById('r1').checked = true; document.getElementById('r1').value = 'off'; document.forms[0].submit(); }\" type=\"checkbox\" id=\"r1\" name=\"r1\" value=\"0\"><label for=\"r1\">Desk lamp</label>&nbsp;\n"
     "         <input onclick=\"if (document.getElementById('r2').checked) { document.getElementById('r2').checked = true; document.getElementById('r2').value = 'on'; document.forms[0].submit(); } else { document.getElementById('r2').checked = true; document.getElementById('r2').value = 'off'; document.forms[0].submit(); }\" type=\"checkbox\" id=\"r2\" name=\"r2\" value=\"0\"><label for=\"r2\">Relay</label>\n"
     "       </div>\n"
     //"       <br>\n"
@@ -619,7 +705,8 @@ const char topA[] PROGMEM =
     "       document.getElementById('brightnessSlider').value = $D;\n"
     ;
 
-const char topB[] PROGMEM = 
+const char topB[] PROGMEM =
+    //"       document.getElementById('stats').href = \"javascript:alert('$L + $D')\";\n"
     "       document.getElementById('volumeValue').innerHTML = $D;\n"
     "       document.getElementById('volumeSlider').value = $D;\n"
     ;
@@ -698,6 +785,8 @@ void ether_get(bool external, bool authed = false)
     buffer = ether.tcpOffset();
     buffer.emit_p(
       topB,
+      //epoch,
+      //millis() / 1000,
       _volume,
       _volume
     );
@@ -998,6 +1087,7 @@ void ether_post(char* packet)
       /*digitalWrite(CTL_PIN_DESKLAMP, LOW);*/
       pin_desklamp = 0;
     }
+    EEPROM.write(EEPROM_DESKLAMP, pin_desklamp);
   }
   else if (r2[0] != 0 && r2[0] != '0')
   {
@@ -1114,6 +1204,23 @@ void ether_post(char* packet)
 
 void loop() 
 {
+  wdt_reset();
+
+/*
+  if (!((millis() / 1000) % 20))
+  {
+    while(1){};
+  }
+*/
+
+  if (!((millis() / 1000) % RESPRING_DELAY) || !ether.isLinkUp())
+  {
+    Serial.println(millis() / 1000);
+    digitalWrite(reset_pin, LOW);
+    delay(10);
+    reset();
+  }
+  
   word len = ether.packetReceive();
   word pos = ether.packetLoop(len);
   if (pos) 
