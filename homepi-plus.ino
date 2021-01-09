@@ -138,9 +138,11 @@ uint8_t attempts = 0;
 unsigned int last_code = 0;
 
 #define EEPROM_DESKLAMP 0
-#define RESPRING_DELAY 60 // in seconds
+#define RESPRING_DELAY 1200 // in seconds
 
 void(*reset) (void) = 0;
+
+int pause_advertising = 0;
 
 ////void print_time()
 ////{
@@ -962,10 +964,38 @@ void ether_post(char* packet)
 
   if (realAction == 1)
   {
+    if (volume == 101)
+    {
+      char _volume = ddc_get(DDC_VOLUME);
+      _volume--;
+      if (_volume < 0) _volume = 0;
+      volume = _volume;
+    }
+    else if (volume == 102)
+    {
+      char _volume = ddc_get(DDC_VOLUME);
+      _volume++;
+      if (_volume > 100) _volume = 100;
+      volume = _volume;
+    }
     ddc_set(DDC_VOLUME, volume);
   }
   else if (realAction == 2)
   {
+    if (brightness == 101)
+    {
+      char _brightness = ddc_get(DDC_BRIGHTNESS);
+      _brightness--;
+      if (_brightness < 0) _brightness = 0;
+      brightness = _brightness;
+    }
+    else if (brightness == 102)
+    {
+      char _brightness = ddc_get(DDC_BRIGHTNESS);
+      _brightness++;
+      if (_brightness > 100) _brightness = 100;
+      brightness = _brightness;
+    }
     ddc_set(DDC_BRIGHTNESS, brightness);
   }
   else if (source[0] != 0)
@@ -1079,13 +1109,32 @@ void ether_post(char* packet)
       /*digitalWrite(CTL_PIN_DESKLAMP, HIGH);*/
       pin_desklamp = 1;
     }
-    else
+    else if (!strcmp(r1, "off"))
     {
       port0 &= ~(1 << CTL_PIN_DESKLAMP0);
       shift_ports();
       
       /*digitalWrite(CTL_PIN_DESKLAMP, LOW);*/
       pin_desklamp = 0;
+    }
+    else
+    {
+      if (pin_desklamp)
+      {
+        port0 &= ~(1 << CTL_PIN_DESKLAMP0);
+        shift_ports();
+        
+        /*digitalWrite(CTL_PIN_DESKLAMP, LOW);*/
+        pin_desklamp = 0;
+      }
+      else
+      {
+        port0 |= (1 << CTL_PIN_DESKLAMP0);
+        shift_ports();
+        
+        /*digitalWrite(CTL_PIN_DESKLAMP, HIGH);*/
+        pin_desklamp = 1;
+      }
     }
     EEPROM.write(EEPROM_DESKLAMP, pin_desklamp);
   }
@@ -1099,13 +1148,32 @@ void ether_post(char* packet)
       /*digitalWrite(CTL_PIN_RELAY, HIGH);*/
       pin_relay = 1;
     }
-    else
+    else if (!strcmp(r1, "off"))
     {
       port0 &= ~(1 << CTL_PIN_RELAY0);
       shift_ports();
       
       /*digitalWrite(CTL_PIN_RELAY, LOW);*/
       pin_relay = 0;
+    }
+    else
+    {
+      if (pin_relay)
+      {
+        port0 &= ~(1 << CTL_PIN_RELAY0);
+        shift_ports();
+      
+        /*digitalWrite(CTL_PIN_RELAY, LOW);*/
+        pin_relay = 0;
+      }
+      else
+      {
+        port0 |= (1 << CTL_PIN_RELAY0);
+        shift_ports();
+        
+        /*digitalWrite(CTL_PIN_RELAY, HIGH);*/
+        pin_relay = 1;
+      }
     }
   }
   else if (hdmi[0] != 0 && hdmi[0] != '0')
@@ -1220,6 +1288,16 @@ void loop()
     delay(10);
     reset();
   }
+
+  if (!pause_advertising && ((millis() % 10000) < 10))
+  {
+    pause_advertising = 1;
+    mdns.advertise();
+  }
+  if ((millis() % 10000) > 10)
+  {
+    pause_advertising = 0;
+  }
   
   word len = ether.packetReceive();
   word pos = ether.packetLoop(len);
@@ -1271,7 +1349,12 @@ void loop()
     bool is_external = false;
     bool authed = false;
     uint8_t* ip_src = ether.buffer + 0x1A;
-    if (ether.compareAddresses(ip_src, ether.gwip))
+    // an ideal solution is to match ip with mask
+    // for now, this is good enough and fixes the
+    // previous solution which was shit; sorry for 
+    // that
+    if (!(ip_src[0] == ip[0] && ip_src[1] == ip[1] && ip_src[2] == ip[2]))
+    // if (ether.compareAddresses(ip_src, ether.gwip))
     {
       is_external = true;
       char* addr = strstr(packet, " /");
