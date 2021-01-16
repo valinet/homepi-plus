@@ -15,6 +15,10 @@ Currently, this project interfaces with and allows control of the following:
 * (Deprecated) Control of Delock 18685 4K HDMI switch which uses the NEC infrared protocol
 * Controlled access from public Internet; you may need to set up port forwarding on the NAT box (the router usually) if you (VERY VERY probably) do not assign a public IP to this
 
+## Schematic
+
+<img src="res\schematic.png" alt="schematic" style="zoom:50%;" />
+
 ## Inner workings
 
 In order to 'talk' with the Arduino, a web service is implemented. This leverages the ENC28J60 module; communication is done using the EtherCard library. This was chosen instead of UIPEthernet because it comes with a smaller footprint, especially on the flash memory side, which is almost maxed out by the latter library on the Nano.
