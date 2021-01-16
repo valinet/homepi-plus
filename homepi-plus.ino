@@ -37,7 +37,7 @@
 // TOTP
 #include "src/TOTP-Arduino/src/TOTP.h"
 // header file containing secret for TOTP
-#include "C:\KEYS\key.h" // contains KEY define
+#include "KEYS/key.h" // contains KEY define
 
 int reset_pin = 9;
 int latchPin = 4;
